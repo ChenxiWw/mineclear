@@ -140,12 +140,15 @@ def parse_args():
     parser.add_argument('--verbose', action='store_true', help='是否打印详细信息')
     parser.add_argument('--initial_difficulty', type=int, default=3, help='初始难度')
     parser.add_argument('--max_difficulty', type=int, default=10, help='最大难度')
+    parser.add_argument('--difficulty_threshold', type=float, default=0.7, 
+                        help='提高难度的胜率阈值（当胜率超过此值时提高难度）')
     parser.add_argument('--disable_reasoning', action='store_true', help='禁用人类推理能力')
     
     # 评估参数
     parser.add_argument('--model_path', type=str, help='加载模型的路径')
     parser.add_argument('--eval_episodes', type=int, default=100, help='评估回合数')
     parser.add_argument('--eval_difficulty', type=int, help='评估难度')
+    parser.add_argument('--stochastic', action='store_true', help='评估时使用随机策略而非确定性策略')
     
     # 比较参数
     parser.add_argument('--compare_episodes', type=int, default=50, help='比较评估的回合数')
@@ -184,7 +187,7 @@ def main():
             num_episodes=args.num_episodes, 
             initial_difficulty=args.initial_difficulty,
             max_difficulty=args.max_difficulty,
-            difficulty_increase_threshold=args.difficulty_threshold,
+            difficulty_increase_threshold=getattr(args, 'difficulty_threshold', 0.7),
             eval_freq=args.eval_freq,
             save_freq=args.save_freq,
             render=args.render,
@@ -208,7 +211,7 @@ def main():
             num_episodes=args.eval_episodes,
             difficulty=args.eval_difficulty,
             render=args.render,
-            deterministic=not args.stochastic,
+            deterministic=not getattr(args, 'stochastic', False),
             use_human_reasoning=not args.disable_reasoning  # 默认启用人类推理
         )
         

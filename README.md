@@ -18,9 +18,11 @@ mineclear/
 │   └── ppo_trainer.py # PPO训练器
 ├── visualization/    # 可视化AI决策过程
 ├── real_game/        # 真实游戏对接
+│   └── minesweeper_game.py # 可玩的扫雷游戏实现
 ├── utils/            # 辅助函数
 ├── main.py           # 主程序
 ├── test_project.py   # 测试脚本
+├── evaluate_models.py # 模型评估脚本
 └── requirements.txt  # 项目依赖
 ```
 
@@ -31,11 +33,13 @@ mineclear/
    - 丰富的奖励系统，包括策略奖励和信息增益奖励
    - 自动避免首次点击踩雷
 
-2. **高级DQN智能体**
-   - 深度卷积神经网络带有注意力机制
-   - 四通道状态表示，增强模式识别
-   - 双重DQN实现，提升训练稳定性
-   - 奖励整形和优先级经验回放
+2. **先进强化学习算法**
+   - **Dueling DQN**: 分离状态价值和动作优势函数
+   - **优先经验回放(PER)**: 根据TD误差为经验分配优先级
+   - **双重DQN(Double DQN)**: 减少Q值过估计问题
+   - **深度卷积网络**: 带有注意力机制的深度卷积网络
+   - **四通道状态表示**: 增强模式识别能力
+   - **高级奖励塑形**: 根据游戏状态定制奖励信号
 
 3. **人类推理能力**
    - 模拟人类玩扫雷的思维过程
@@ -59,9 +63,10 @@ mineclear/
    - 详细性能指标展示：平均奖励、胜率和推理使用率
    - 自动生成对比报告
 
-7. **可视化与现实游戏对接**
-   - 实时决策可视化
-   - 真实游戏对接（通过OpenCV捕获屏幕，自动控制鼠标）
+7. **可视化与游戏实现**
+   - 交互式扫雷游戏实现，支持人类和AI玩家
+   - 实时AI辅助功能
+   - 详细的游戏统计和结果分析
 
 8. **完整测试套件**
    - 自动化测试环境、智能体和训练模块
@@ -82,16 +87,22 @@ pip install -r requirements.txt
 python main.py --mode train --num_episodes 10000 --initial_difficulty 3 --render --verbose
 ```
 
+高级训练参数：
+```bash
+python main.py --mode train --num_episodes 10000 --batch_size 128 --learning_rate 0.0001 --use_human_reasoning True --disable_reasoning False
+```
+
 参数说明：
 - `--algorithm`: 选择训练算法，支持 'dqn' 或 'ppo'
 - `--num_episodes`: 训练回合数
 - `--initial_difficulty`: 初始难度(地雷数)
 - `--disable_reasoning`: 禁用人类推理能力
+- `--difficulty_threshold`: 提高难度的胜率阈值(默认0.7)
 
 ### 评估模式
 
 ```bash
-python main.py --mode eval --model_path models/dqn_model_ep3000_diff10.pth --eval_episodes 50
+python main.py --mode eval --model_path models/dqn_model_ep8100_diff4.pth --eval_episodes 50
 ```
 
 参数说明：
@@ -99,11 +110,17 @@ python main.py --mode eval --model_path models/dqn_model_ep3000_diff10.pth --eva
 - `--eval_episodes`: 评估的回合数
 - `--eval_difficulty`: 评估的难度级别
 - `--disable_reasoning`: 禁用人类推理能力
+- `--stochastic`: 使用随机策略而非确定性策略
 
 ### 比较不同方法
 
 ```bash
-python main.py --mode compare --model_path models/dqn_model_ep3000_diff10.pth --compare_episodes 50 --eval_difficulty 5
+python main.py --mode compare --model_path models/dqn_model_ep8100_diff4.pth --compare_episodes 50 --eval_difficulty 5
+```
+
+批量评估模型：
+```bash
+python evaluate_models.py
 ```
 
 参数说明：
@@ -114,7 +131,12 @@ python main.py --mode compare --model_path models/dqn_model_ep3000_diff10.pth --
 ### 游戏模式
 
 ```bash
-python main.py --mode play --width 9 --height 9 --num_mines 10 --model_path dqn_model_ep3000_diff10.pth
+python main.py --mode play --width 9 --height 9 --num_mines 10 --model_path models/dqn_model_ep8100_diff4.pth
+```
+
+自定义控制键：
+```bash
+python main.py --mode play --width 9 --height 9 --num_mines 10 --ai-key=s --reset-key=n --quit-key=e
 ```
 
 参数说明：
@@ -122,6 +144,9 @@ python main.py --mode play --width 9 --height 9 --num_mines 10 --model_path dqn_
 - `--height`: 游戏板高度
 - `--num_mines`: 地雷数量
 - `--model_path`: 加载AI模型
+- `--ai-key`: AI辅助键 (默认为'a')
+- `--reset-key`: 重置游戏键 (默认为'r')
+- `--quit-key`: 退出游戏键 (默认为'q')
 
 ### 测试模式
 
@@ -139,42 +164,43 @@ python test_project.py [--all] [--dependencies] [--environment] [--agent] [--tra
 - `--benchmark`: 仅运行性能基准测试
 - `--seed`: 设置随机种子（默认42）
 
-## 最新改进
+## 改进
 
-### 1. 人类推理模块
+### 1. 先进强化学习算法实现
 
-项目现在集成了强大的人类推理模块，大幅提升AI性能：
-- **单格推理**：识别确定安全或确定是地雷的格子
-- **重叠约束推理**：分析多个数字格子的共同约束
-- **概率分析**：计算每个未知格子是地雷的概率
-- **整合机制**：在能确定安全格子时使用推理，不确定时使用神经网络
+- **Dueling DQN架构**：将Q值分解为状态价值函数V(s)和优势函数A(s,a)，更高效地学习状态价值
+- **优先经验回放(PER)**：基于TD误差为重要经验分配更高采样概率，提高学习效率
+- **高级奖励塑形策略**：
+  - 连锁反应奖励：根据一次操作打开的格子数量给予额外奖励
+  - 边缘探索奖励：鼓励在已知区域边缘探索的行为
+  - 逻辑推理奖励：对符合逻辑推理的决策给予额外奖励
+  - 基于进度的失败惩罚：根据游戏进度调整失败惩罚的严重程度
 
-### 2. 增强的神经网络架构
+### 2. 改进的人类推理模块
 
-- **四通道状态表示**：更丰富的状态信息
-- **注意力机制**：帮助模型关注棋盘上的重要区域
-- **更深的网络**：三层卷积网络配合两层全连接层
-- **批量归一化和Dropout**：提高训练稳定性，防止过拟合
+- **CSP求解器优化**：更高效的约束满足问题求解器
+- **概率模型改进**：更准确的地雷概率计算方法
+- **推理-网络协同机制**：智能地在确定性推理和概率性决策之间切换
+- **边缘格子识别**：识别和优先探索信息丰富的边缘格子
 
-### 3. 方法对比功能
+### 3. 增强的游戏体验
 
-- 全新的对比评估系统，可比较三种方法：
-  - **纯人类逻辑**：仅使用逻辑推理
-  - **纯DQN**：仅使用神经网络
-  - **混合方法**：结合逻辑推理和神经网络
-- 自动生成详细对比报告，包括奖励、胜率和推理使用率
+- **交互式游戏界面**：使用pygame实现的完整扫雷游戏
+- **AI辅助功能**：一键获取AI建议的最佳下一步
+- **自定义控制键**：可通过命令行参数自定义游戏控制键
+- **游戏内状态显示**：实时显示地雷数量和游戏状态
 
-### 4. 优化的训练流程
+### 4. 训练与评估改进
 
-- 动态难度调整阈值：从0.7降低到0.4，更合理的进阶策略
-- 更细致的奖励整形，鼓励探索和策略决策
-- 人类推理使用统计跟踪，帮助了解决策过程
+- **自动难度调整**：基于胜率动态调整训练难度
+- **批量模型评估**：使用`evaluate_models.py`脚本批量评估多个模型
+- **不同决策策略的详细统计**：记录并分析推理vs神经网络决策的效果
+- **训练过程可视化**：显示实时训练进度和性能指标
 
-### 5. 测试套件
+## 性能表现
 
-- 全面的自动化测试系统，覆盖所有模块和功能
-- 性能基准测试，实时监控系统效率
-- 人类推理模块性能特别突出，较神经网络推理快约200倍以上
+依托答辩
+
 
 ## 贡献
 

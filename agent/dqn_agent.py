@@ -71,6 +71,174 @@ class DQNNetwork(nn.Module):
         
         return x
 
+class DuelingDQNNetwork(nn.Module):
+    """
+    基于Dueling架构的深度Q网络模型
+    将Q值分解为状态值V(s)和优势函数A(s,a)
+    Q(s,a) = V(s) + A(s,a) - mean(A(s,a))
+    """
+    def __init__(self, height, width, hidden_size=256):
+        super(DuelingDQNNetwork, self).__init__()
+        self.height = height
+        self.width = width
+        input_channels = 4
+        
+        # 共享的特征提取层
+        # 卷积层
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        
+        # 批量归一化层
+        self.bn1 = nn.BatchNorm2d(32)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.bn3 = nn.BatchNorm2d(64)
+        
+        # 注意力机制
+        self.attention = nn.Sequential(
+            nn.Conv2d(64, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+        
+        # 计算卷积后的特征图大小
+        conv_output_size = height * width * 64
+        
+        # 价值流 - 评估状态的价值V(s)
+        self.value_stream = nn.Sequential(
+            nn.Linear(conv_output_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, 1)  # 输出单一状态值
+        )
+        
+        # 优势流 - 评估每个动作的优势A(s,a)
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(conv_output_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_size // 2, height * width)  # 输出每个动作的优势
+        )
+    
+    def forward(self, x):
+        batch_size = x.size(0)
+        x = x.view(batch_size, 4, self.height, self.width)
+        
+        # 特征提取
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
+        
+        # 注意力机制
+        attention_weights = self.attention(x)
+        x = x * attention_weights
+        
+        # 展平
+        x = x.view(batch_size, -1)
+        
+        # 计算状态值
+        value = self.value_stream(x)
+        
+        # 计算动作优势
+        advantage = self.advantage_stream(x)
+        
+        # 合并价值和优势得到Q值：Q = V(s) + A(s,a) - mean(A(s,a))
+        # 减去平均优势以增强数值稳定性
+        q_values = value + advantage - advantage.mean(dim=1, keepdim=True)
+        
+        return q_values
+
+# 定义优先经验回放缓冲区
+class PrioritizedReplayBuffer:
+    """
+    优先经验回放缓冲区
+    根据TD误差大小对经验进行优先级采样
+    """
+    def __init__(self, max_size, alpha=0.6, beta=0.4, beta_increment=0.001, epsilon=0.01):
+        """
+        初始化优先经验回放缓冲区
+        
+        参数:
+            max_size: 缓冲区最大容量
+            alpha: 决定优先级影响程度的指数 (0表示均匀采样, 1表示完全按优先级)
+            beta: 重要性采样的指数，用于修正采样偏差 (1表示完全修正)
+            beta_increment: 每次采样后beta的增加量
+            epsilon: 添加到TD误差以确保所有经验至少有一些采样概率
+        """
+        self.max_size = max_size
+        self.buffer = []
+        self.priorities = []
+        self.alpha = alpha
+        self.beta = beta
+        self.beta_increment = beta_increment
+        self.epsilon = epsilon
+        self.next_index = 0
+        self._max_priority = 1.0  # 新经验的初始优先级
+    
+    def __len__(self):
+        return len(self.buffer)
+    
+    def add(self, experience, error=None):
+        """添加新经验到缓冲区"""
+        priority = self._max_priority if error is None else (abs(error) + self.epsilon) ** self.alpha
+        
+        if len(self.buffer) < self.max_size:
+            self.buffer.append(experience)
+            self.priorities.append(priority)
+        else:
+            if self.next_index >= len(self.buffer):
+                self.next_index = 0
+            self.buffer[self.next_index] = experience
+            self.priorities[self.next_index] = priority
+            
+        self.next_index = (self.next_index + 1) % self.max_size
+    
+    def sample(self, batch_size):
+        """从缓冲区中采样一批经验"""
+        if len(self.buffer) < batch_size:
+            return [], [], []
+            
+        # 计算采样概率 - 确保是一维数组
+        priorities = np.array(self.priorities, dtype=np.float32).flatten()
+        sum_priorities = np.sum(priorities)
+        
+        if sum_priorities == 0:
+            # 如果所有优先级都是0，使用均匀分布
+            probs = np.ones_like(priorities) / len(priorities)
+        else:
+            probs = priorities / sum_priorities
+        
+        # 按概率采样，确保probs是一维数组
+        try:
+            indices = np.random.choice(len(self.buffer), batch_size, p=probs, replace=False)
+        except ValueError as e:
+            print(f"采样错误: {e}")
+            print(f"probs形状: {probs.shape}, 是否一维: {probs.ndim == 1}")
+            print(f"probs总和: {np.sum(probs)}")
+            # 使用均匀采样作为备选方案
+            indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        
+        samples = [self.buffer[idx] for idx in indices]
+        
+        # 计算重要性权重
+        weights = (len(self.buffer) * probs[indices]) ** (-self.beta)
+        weights = weights / weights.max()  # 归一化权重
+        
+        # 增加beta以逐渐减少偏差
+        self.beta = min(1.0, self.beta + self.beta_increment)
+        
+        return samples, indices, np.array(weights, dtype=np.float32)
+    
+    def update_priorities(self, indices, errors):
+        """更新经验的优先级"""
+        for idx, error in zip(indices, errors):
+            priority = (abs(error) + self.epsilon) ** self.alpha
+            self.priorities[idx] = priority
+            self._max_priority = max(self._max_priority, priority)
+     
 class DQNAgent:
     """
     基于DQN的扫雷游戏智能体
@@ -78,7 +246,9 @@ class DQNAgent:
     def __init__(self, height, width, device=None, learning_rate=2e-4, gamma=0.99, 
                  epsilon_start=1.0, epsilon_end=0.05, epsilon_decay=0.997,
                  memory_size=20000, batch_size=128, target_update=5,
-                 double_dqn=True, supervised_pretrain=True, use_human_reasoning=True):  # 增加预训练选项和人类推理选项
+                 double_dqn=True, dueling_dqn=True, 
+                 prioritized_replay=True, supervised_pretrain=True, 
+                 use_human_reasoning=True):
         """
         初始化DQN智能体
         
@@ -95,6 +265,8 @@ class DQNAgent:
             batch_size (int): 批次大小
             target_update (int): 目标网络更新频率
             double_dqn (bool): 是否使用双重DQN
+            dueling_dqn (bool): 是否使用Dueling DQN
+            prioritized_replay (bool): 是否使用优先经验回放
             supervised_pretrain (bool): 是否使用自监督预训练
             use_human_reasoning (bool): 是否使用人类推理能力
         """
@@ -103,15 +275,24 @@ class DQNAgent:
         self.state_size = height * width
         self.action_size = height * width
         self.double_dqn = double_dqn
+        self.dueling_dqn = dueling_dqn
+        self.prioritized_replay = prioritized_replay
         self.supervised_pretrain = supervised_pretrain
         self.use_human_reasoning = use_human_reasoning
         
         # 设置设备
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # DQN网络
-        self.policy_net = DQNNetwork(height, width).to(self.device)
-        self.target_net = DQNNetwork(height, width).to(self.device)
+        # 选择网络架构
+        if dueling_dqn:
+            # 使用Dueling DQN网络
+            self.policy_net = DuelingDQNNetwork(height, width).to(self.device)
+            self.target_net = DuelingDQNNetwork(height, width).to(self.device)
+        else:
+            # 使用标准DQN网络
+            self.policy_net = DQNNetwork(height, width).to(self.device)
+            self.target_net = DQNNetwork(height, width).to(self.device)
+            
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()  # 目标网络不需要训练
         
@@ -120,7 +301,10 @@ class DQNAgent:
         self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.95)
         
         # 经验回放缓冲区
-        self.memory = deque(maxlen=memory_size)
+        if prioritized_replay:
+            self.memory = PrioritizedReplayBuffer(max_size=memory_size)
+        else:
+            self.memory = deque(maxlen=memory_size)
         
         # 记忆机制：记录明显安全的格子
         self.known_safe_cells = set()
@@ -279,96 +463,238 @@ class DQNAgent:
         else:
             next_state_array = next_state
         
-        # 应用奖励塑形
-        shaped_reward = reward
+        # 高级奖励塑形策略
+        shaped_reward = self._shape_reward(reward, state, next_state, action, done)
         
-        # 奖励塑形1：非终止状态的连续性奖励
-        if not done:
-            shaped_reward += 0.1  # 鼓励探索
-            
-            # 奖励塑形2：下一个状态中的空白格子数量
-            if isinstance(next_state, dict):
-                blank_cells = np.sum(next_state["board"] == 0)
-                shaped_reward += 0.05 * blank_cells
-            
-            # 奖励塑形3：选择边缘格子（紧邻已知数字的格子）
-            y, x = divmod(action, self.width)
-            edge_reward = 0
-            
-            if isinstance(state, dict):
-                for dy in [-1, 0, 1]:
-                    for dx in [-1, 0, 1]:
-                        if dy == 0 and dx == 0:
-                            continue
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < self.height and 0 <= nx < self.width:
-                            # 如果周围有数字格子（1-8），增加奖励
-                            if 1 <= state["board"][ny, nx] <= 8:
-                                edge_reward = 0.2
-                                break
-            
-            shaped_reward += edge_reward
-        
-        # 存储经验（带有塑形后的奖励）
+        # 存储经验
         experience = (state_array, action, shaped_reward, next_state_array, done)
-        self.memory.append(experience)
+        
+        # 根据使用的回放缓冲区类型不同处理方式不同
+        if self.prioritized_replay:
+            # 对于优先经验回放，先用最大优先级添加
+            self.memory.add(experience)
+        else:
+            # 对于普通经验回放，直接添加
+            self.memory.append(experience)
         
         # 如果使用预训练，也保存给自监督学习使用
         if self.supervised_pretrain and not done:
             self.pretrain_memory.append((state_array, action))
     
+    def _shape_reward(self, original_reward, state, next_state, action, done):
+        """
+        应用高级奖励塑形策略
+        
+        参数:
+            original_reward: 原始奖励
+            state: 当前状态
+            next_state: 下一个状态
+            action: 执行的动作
+            done: 是否是终止状态
+            
+        返回:
+            shaped_reward: 塑形后的奖励
+        """
+        shaped_reward = original_reward
+        
+        # 1. 基本的奖励塑形: 非终止状态的连续性奖励
+        if not done:
+            shaped_reward += 0.1  # 鼓励探索
+        
+        # 2. 成功打开空白格的奖励（可能触发连锁反应）
+        if isinstance(next_state, dict) and isinstance(state, dict):
+            # 计算新打开的格子数量
+            prev_opened = np.sum(state["board"] >= 0)
+            curr_opened = np.sum(next_state["board"] >= 0)
+            newly_opened = curr_opened - prev_opened
+            
+            # 奖励与新打开的格子数量成正比
+            if newly_opened > 1:  # 如果打开了多个格子（触发连锁反应）
+                shaped_reward += 0.1 * newly_opened
+        
+        # 3. 边缘探索奖励 - 鼓励在已知区域边缘探索
+        if isinstance(state, dict):
+            y, x = divmod(action, self.width)
+            edge_reward = 0
+            
+            # 检查选择的格子是否在已知数字旁边
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self.height and 0 <= nx < self.width:
+                        # 如果周围有数字格子，增加奖励
+                        if 1 <= state["board"][ny, nx] <= 8:
+                            edge_reward = 0.2
+                            break
+            
+            shaped_reward += edge_reward
+        
+        # 4. 避免点开已知地雷的惩罚
+        if done and original_reward < 0:  # 游戏失败
+            # 检查是否可以通过逻辑推理避免这个错误
+            if self.use_human_reasoning:
+                board_state = self.preprocess_state(state["board"])
+                action_mask = np.ones(self.action_size)
+                for i in range(self.action_size):
+                    y, x = divmod(i, self.width)
+                    if state["board"][y, x] >= 0:  # 已经打开的格子
+                        action_mask[i] = 0
+                
+                # 找出所有可能的地雷位置
+                _, mine_actions = self.human_reasoning.solve_with_csp(board_state, action_mask)
+                
+                # 如果选择的动作在推理出的地雷位置中，额外惩罚
+                if action in mine_actions:
+                    shaped_reward -= 1.0  # 额外惩罚推理失误
+        
+        # 5. 对正确标记地雷或安全打开格子的奖励
+        if self.use_human_reasoning:
+            board_state = self.preprocess_state(state["board"]) if isinstance(state, dict) else state
+            action_mask = np.ones(self.action_size)
+            
+            if isinstance(state, dict):
+                for i in range(self.action_size):
+                    y, x = divmod(i, self.width)
+                    if state["board"][y, x] >= 0:  # 已经打开的格子
+                        action_mask[i] = 0
+            
+            # 找出安全的格子
+            safe_actions, _ = self.human_reasoning.solve_with_csp(board_state, action_mask)
+            
+            # 如果选择的动作在推理出的安全位置中，奖励正确决策
+            if action in safe_actions and not done:
+                shaped_reward += 0.5  # 奖励正确的推理决策
+        
+        # 6. 为游戏最终结果提供额外奖励/惩罚
+        if done:
+            if original_reward > 0:  # 游戏胜利
+                shaped_reward += 2.0  # 额外胜利奖励
+            else:  # 游戏失败
+                # 根据游戏进度给予不同程度的惩罚
+                if isinstance(state, dict):
+                    # 计算已打开的格子百分比
+                    total_cells = self.height * self.width
+                    opened_cells = np.sum(state["board"] >= 0)
+                    progress = opened_cells / total_cells
+                    
+                    # 根据进度减轻惩罚
+                    if progress > 0.5:  # 如果已经完成一半以上
+                        shaped_reward += 1.0  # 减轻失败惩罚
+        
+        return shaped_reward
+    
     def replay(self):
         """从经验回放缓冲区中学习"""
-        if len(self.memory) < self.batch_size:
-            return None
-        
-        # 随机采样一个批次
-        minibatch = random.sample(self.memory, self.batch_size)
-        
-        # 准备批次数据
-        states, actions, rewards, next_states, dones = zip(*minibatch)
-        
-        # 将列表转换为numpy数组，再转换为tensor
-        states = torch.FloatTensor(np.array(states)).to(self.device)
-        actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
-        
-        # 计算当前Q值
-        current_q_values = self.policy_net(states).gather(1, actions)
-        
-        # 使用Double DQN计算目标Q值
-        # 使用策略网络选择动作，使用目标网络评估它们
-        if self.double_dqn:
-            with torch.no_grad():
-                # 使用策略网络确定最佳动作
-                next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
-                # 使用目标网络评估这些动作的价值
-                max_next_q_values = self.target_net(next_states).gather(1, next_actions)
+        if self.prioritized_replay:
+            # 优先经验回放
+            if len(self.memory) < self.batch_size:
+                return None
+            
+            # 按优先级采样
+            samples, indices, weights = self.memory.sample(self.batch_size)
+            if not samples:  # 如果采样失败
+                return None
+                
+            # 解包样本
+            states, actions, rewards, next_states, dones = zip(*samples)
+            
+            # 转换为张量
+            states = torch.FloatTensor(np.array(states)).to(self.device)
+            actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
+            rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+            next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+            dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+            weights = torch.FloatTensor(weights).unsqueeze(1).to(self.device)
+            
+            # 计算当前Q值
+            current_q_values = self.policy_net(states).gather(1, actions)
+            
+            # 使用Double DQN或标准DQN计算目标Q值
+            if self.double_dqn:
+                with torch.no_grad():
+                    # 使用策略网络选择动作
+                    next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+                    # 使用目标网络评估动作
+                    next_q_values = self.target_net(next_states).gather(1, next_actions)
+            else:
+                with torch.no_grad():
+                    next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            
+            # 计算目标值
+            target_q_values = rewards + (self.gamma * next_q_values * (1 - dones))
+            
+            # 计算TD误差 (用于更新优先级)
+            td_errors = torch.abs(current_q_values - target_q_values).detach().cpu().numpy()
+            
+            # 带权重的Huber损失
+            loss = (weights * F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')).mean()
+            
+            # 优化模型
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            
+            self.optimizer.step()
+            
+            # 更新经验优先级
+            self.memory.update_priorities(indices, td_errors)
+            
         else:
-            # 标准DQN：直接选择目标网络的最大值
-            with torch.no_grad():
-                max_next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
-        
-        # 贝尔曼方程计算目标值
-        target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
-        
-        # 计算Huber损失（对异常值更稳健）
-        loss = F.smooth_l1_loss(current_q_values, target_q_values)
-        
-        # 优化模型
-        self.optimizer.zero_grad()
-        loss.backward()
-        
-        # 梯度裁剪，防止梯度爆炸
-        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
-        
-        self.optimizer.step()
+            # 标准经验回放
+            if len(self.memory) < self.batch_size:
+                return None
+            
+            # 随机采样一个批次
+            minibatch = random.sample(self.memory, self.batch_size)
+            
+            # 准备批次数据
+            states, actions, rewards, next_states, dones = zip(*minibatch)
+            
+            # 将列表转换为numpy数组，再转换为tensor
+            states = torch.FloatTensor(np.array(states)).to(self.device)
+            actions = torch.LongTensor(actions).unsqueeze(1).to(self.device)
+            rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+            next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+            dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
+            
+            # 计算当前Q值
+            current_q_values = self.policy_net(states).gather(1, actions)
+            
+            # 使用Double DQN计算目标Q值
+            if self.double_dqn:
+                with torch.no_grad():
+                    # 使用策略网络确定最佳动作
+                    next_actions = self.policy_net(next_states).max(1)[1].unsqueeze(1)
+                    # 使用目标网络评估这些动作的价值
+                    max_next_q_values = self.target_net(next_states).gather(1, next_actions)
+            else:
+                # 标准DQN：直接选择目标网络的最大值
+                with torch.no_grad():
+                    max_next_q_values = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            
+            # 贝尔曼方程计算目标值
+            target_q_values = rewards + (self.gamma * max_next_q_values * (1 - dones))
+            
+            # 计算Huber损失（对异常值更稳健）
+            loss = F.smooth_l1_loss(current_q_values, target_q_values)
+            
+            # 优化模型
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+            
+            self.optimizer.step()
         
         # 软更新目标网络
         self._soft_update_target_network()
         
+        # 返回损失值用于监控
         return loss.item()
     
     def preprocess_state(self, board):

@@ -7,7 +7,7 @@ models_dir = "models"
 # 评估难度
 difficulty = 5
 # 每个模型评估的回合数
-episodes = 50
+episodes = 20
 
 # 获取所有模型文件
 model_files = [f for f in os.listdir(models_dir) if f.endswith(".pth")]
